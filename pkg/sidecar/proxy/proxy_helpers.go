@@ -206,7 +206,6 @@ var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldMaxCompletionTokens:  {},
 	reqcommon.FieldMaxOutputTokens:      {},
 	reqcommon.FieldMinTokens:            {},
-	reqcommon.FieldSamplingParams:       {},
 	reqcommon.FieldStream:               {},
 	reqcommon.FieldStreamOptions:        {},
 	reqcommon.FieldEcho:                 {},

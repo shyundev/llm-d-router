@@ -271,6 +271,20 @@ func TestCapSingleToken(t *testing.T) {
 				"stream": false,
 			},
 		},
+		{
+			name:    "generate keeps the raw bytes of raw sampling_params entries",
+			apiType: APITypeVLLMGenerate,
+			body: map[string]any{
+				"sampling_params": json.RawMessage(`{"max_tokens":100,"min_tokens":5,"seed":9007199254740993}`),
+			},
+			want: map[string]any{
+				"sampling_params": map[string]any{
+					"max_tokens": 1,
+					"seed":       json.RawMessage(`9007199254740993`),
+				},
+				"stream": false,
+			},
+		},
 	}
 
 	for _, tt := range tests {

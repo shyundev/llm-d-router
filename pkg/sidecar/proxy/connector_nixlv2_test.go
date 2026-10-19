@@ -973,6 +973,18 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(decodeReq).ToNot(HaveKey(reqcommon.FieldSamplingParams))
 	})
 
+	It("should forward generate sampling_params byte-for-byte, preserving integers and nested key order", func() {
+		samplingParams := `{"max_tokens":50,"seed":9007199254740993,"structured_outputs":{"json":{"type":"object","properties":{"reasoning":{"type":"string"},"answer":{"type":"string"}}}}}`
+		startProxyAndSendGenerate(`{"model":"Qwen/Qwen2-0.5B","token_ids":[1,2,3,4],"sampling_params":`+samplingParams+`}`, true)
+
+		prefillBodies := testInfo.prefillHandler.GetCompletionRawBodies()
+		Expect(prefillBodies).To(HaveLen(1))
+		Expect(string(prefillBodies[0])).To(ContainSubstring(`"seed":9007199254740993`))
+		decodeBodies := testInfo.decodeHandler.GetCompletionRawBodies()
+		Expect(decodeBodies).To(HaveLen(1))
+		Expect(string(decodeBodies[0])).To(ContainSubstring(`"sampling_params":` + samplingParams))
+	})
+
 	It("should pass through generate API request when no prefill header is set", func() {
 		startProxyAndSendGenerate(`{
 				"model": "Qwen/Qwen2-0.5B",

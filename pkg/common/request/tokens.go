@@ -48,7 +48,21 @@ import (
 func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	limits := body
 	if apiType == APITypeVLLMGenerate {
-		sp, _ := body[FieldSamplingParams].(map[string]any)
+		var sp map[string]any
+		switch v := body[FieldSamplingParams].(type) {
+		case map[string]any:
+			sp = v
+		case json.RawMessage:
+			// Entries stay raw, so the ones the caps do not touch are
+			// marshaled back as the client sent them.
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(v, &fields) == nil {
+				sp = make(map[string]any, len(fields))
+				for k, f := range fields {
+					sp[k] = f
+				}
+			}
+		}
 		limits = make(map[string]any, len(sp)+1)
 		maps.Copy(limits, sp)
 		body[FieldSamplingParams] = limits
