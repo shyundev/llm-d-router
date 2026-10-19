@@ -41,6 +41,8 @@ const (
 
 	requestFieldN = "n"
 
+	requestFieldIncludeUsage = "include_usage"
+
 	responseFieldMessage = "message"
 	responseFieldIndex   = "index"
 	responseFieldDelta   = "delta"
@@ -84,6 +86,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	defer span.End()
 
 	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
+	streamOptions, _ := body[reqcommon.FieldStreamOptions].(map[string]any)
+	includeUsage, _ := streamOptions[requestFieldIncludeUsage].(bool)
 	originalMaxTokens := resolveMaxTokens(body)
 
 	span.SetAttributes(
@@ -292,7 +296,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	if streamingEnabled {
 		// Emit corrected cumulative usage as a final event before [DONE].
 		// Individual chunk events have usage stripped by emitSSEChunk.
-		if lastResponse != nil {
+		if lastResponse != nil && includeUsage {
 			usageEvent := map[string]any{
 				reqcommon.FieldUsage: cumulativeUsage,
 				responseFieldChoices: []any{},

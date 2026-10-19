@@ -446,7 +446,7 @@ var _ = Describe("Chunked Decode", func() {
 			defer ti.stop()
 
 			resp := doPost(ti.addr,
-				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,"stream":true}`)
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,"stream":true,"stream_options":{"include_usage":true}}`)
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("text/event-stream"))
 
@@ -477,6 +477,33 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(promptTokens).To(Equal(5))
 			Expect(completionTokens).To(Equal(10))
 			Expect(totalTokens).To(Equal(15))
+		})
+
+		It("emits no usage event when the request does not set stream_options.include_usage", func() {
+			ti := newChunkedTestSetup(5, []string{
+				chatResponse("hello ", "length", 5, 5),
+				chatResponse("world", "stop", 9, 5),
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,"stream":true}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var events []string
+			scanner := bufio.NewScanner(resp.Body)
+			for scanner.Scan() {
+				if line := scanner.Text(); strings.HasPrefix(line, "data: ") {
+					events = append(events, line)
+				}
+			}
+
+			// Two chunk data events + [DONE]
+			Expect(events).To(HaveLen(3))
+			Expect(events[2]).To(Equal(reqcommon.SSEDone))
+			for _, event := range events[:2] {
+				Expect(event).ToNot(ContainSubstring(`"usage"`))
+			}
 		})
 	})
 
