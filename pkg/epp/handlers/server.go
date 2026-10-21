@@ -183,6 +183,11 @@ type RequestContext struct {
 	requestState         streamRequestState
 	requestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
+	// responseEventStream is set when the model server answers with text/event-stream.
+	responseEventStream bool
+	// modelRewriteTail holds the unterminated last line of a streamed chunk until
+	// the chunk that completes it arrives, so the model name rewrite sees whole lines.
+	modelRewriteTail []byte
 
 	reqHeaderResp *extProcPb.ProcessingResponse
 	reqBodyResp   []*extProcPb.ProcessingResponse
@@ -679,6 +684,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					reqCtx.responseStatusCode = errcommon.ModelServerError
 				} else if header.Key == reqcommon.HeaderContentType && strings.Contains(string(header.RawValue), fwkrequest.MediaTypeEventStream) {
 					reqCtx.modelServerStreaming = true
+					reqCtx.responseEventStream = true
 					if traceEnabled {
 						loggerTrace.Info("model server is streaming response")
 					}
@@ -702,7 +708,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk = reqCtx.rewriteStreamedModelName(chunk, endOfStream)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
@@ -816,6 +822,29 @@ func rewriteModelName(body []byte, targetModel, incomingModel string) ([]byte, b
 		return bytes.ReplaceAll(body, old, new), true
 	}
 	return body, false
+}
+
+// rewriteStreamedModelName rewrites the model name in a streamed response chunk.
+// A chunk can end inside an event, so for an event stream the unterminated last
+// line is held back and rewritten together with the chunk that completes it.
+func (r *RequestContext) rewriteStreamedModelName(chunk []byte, endOfStream bool) []byte {
+	if !r.responseEventStream {
+		chunk, _ = rewriteModelName(chunk, r.TargetModelName, r.IncomingModelName)
+		return chunk
+	}
+	if r.TargetModelName == "" || r.IncomingModelName == "" || r.TargetModelName == r.IncomingModelName {
+		return chunk
+	}
+	r.modelRewriteTail = append(r.modelRewriteTail, chunk...)
+	data := r.modelRewriteTail
+	r.modelRewriteTail = nil
+	if !endOfStream {
+		lineEnd := bytes.LastIndexByte(data, '\n') + 1
+		r.modelRewriteTail = bytes.Clone(data[lineEnd:])
+		data = data[:lineEnd]
+	}
+	data, _ = rewriteModelName(data, r.TargetModelName, r.IncomingModelName)
+	return data
 }
 
 // updateStateAndSendIfNeeded checks state and can send multiple responses in a single pass, but only if ordered properly.
