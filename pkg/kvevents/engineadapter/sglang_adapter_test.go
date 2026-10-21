@@ -379,6 +379,38 @@ func TestSGLangParseMessage_MapEncodedBlockStored_CacheSaltAtRoot(t *testing.T) 
 	assert.Equal(t, [][]any{{"tenant-a"}, nil}, blockStored.ExtraKeys)
 }
 
+// TestSGLangParseMessage_MapEncodedBlockStored_LoraName verifies that the
+// adapter name SGLang publishes for LoRA blocks reaches the domain event, so
+// the pool indexes those blocks under the adapter rather than the base model.
+func TestSGLangParseMessage_MapEncodedBlockStored_LoraName(t *testing.T) {
+	adapter := NewSGLangAdapter()
+
+	blockStoredEvent := map[string]any{
+		"type":              "BlockStored",
+		"block_hashes":      []any{uint64(100), uint64(101)},
+		"parent_block_hash": nil,
+		"token_ids":         []uint32{1, 2, 3, 4},
+		"block_size":        2,
+		"lora_id":           nil,
+		"medium":            "GPU",
+		"lora_name":         "adapter-a",
+	}
+	payload, err := msgpack.Marshal([]any{1234567890.0, []any{blockStoredEvent}, nil})
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@base-model",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	require.Len(t, eventBatch.Events, 1)
+
+	blockStored, ok := eventBatch.Events[0].(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	require.NotNil(t, blockStored.LoraName)
+	assert.Equal(t, "adapter-a", *blockStored.LoraName)
+}
+
 // TestSGLangBlockStored_PositionalSaltMetadataIgnored verifies that a positional
 // event carrying the {"cache_salt": ...} metadata slot (sgl-project/sglang#30827,
 // before #37482) still decodes, without reading its salt.
@@ -513,6 +545,16 @@ func TestSGLangMapEncodedErrors(t *testing.T) {
 				"cache_salt":   7,
 			},
 			wantErr: "cache_salt is not a string",
+		},
+		"non-string lora_name": {
+			event: map[string]any{
+				"type":         "BlockStored",
+				"block_hashes": []any{uint64(1)},
+				"token_ids":    []uint32{1},
+				"block_size":   1,
+				"lora_name":    7,
+			},
+			wantErr: "lora_name is not a string",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

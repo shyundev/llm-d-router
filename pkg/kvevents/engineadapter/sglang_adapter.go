@@ -34,7 +34,7 @@ var (
 	sglangBlockRemovedFieldOrder = []string{"block_hashes", "medium"}
 	// sglangBlockStoredOptionalFields are appended after the required positions
 	// for map-encoded events only and do not count toward the minimum length.
-	sglangBlockStoredOptionalFields = []string{"cache_salt"}
+	sglangBlockStoredOptionalFields = []string{"cache_salt", "lora_name"}
 )
 
 // SGLangAdapter implements the kvevents.EngineAdapter interface for SGLang engines.
@@ -142,6 +142,7 @@ func sglangMapEventToFields(ev map[string]any) ([]any, error) {
 //	[5] lora_id            int|nil
 //	[6] medium             string|nil
 //	[7] cache_salt         string|nil        (optional, map form only)
+//	[8] lora_name          string|nil        (optional, map form only)
 //
 // session_id is attribution only and is not carried into kvevents.BlockStoredEvent.
 func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEvent, error) {
@@ -205,6 +206,15 @@ func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericE
 		return nil, fmt.Errorf("BlockStored: cache_salt is not a string: %T", raw)
 	}
 
+	var loraName *string
+	switch raw := fieldAt(fields, 8).(type) {
+	case nil:
+	case string:
+		loraName = &raw
+	default:
+		return nil, fmt.Errorf("BlockStored: lora_name is not a string: %T", raw)
+	}
+
 	// SGLang stamps the salt on every event of a salted node, but the request side
 	// folds it into the first block only (vLLM's extra_keys layout). Events with a
 	// parent inherit the salt through the parent's request key.
@@ -221,6 +231,7 @@ func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericE
 		BlockSize:   blockSize,
 		DeviceTier:  deviceTier,
 		LoraID:      loraID,
+		LoraName:    loraName,
 		ExtraKeys:   extraKeys,
 	}, nil
 }
