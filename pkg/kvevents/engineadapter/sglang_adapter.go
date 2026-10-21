@@ -137,7 +137,7 @@ func sglangMapEventToFields(ev map[string]any) ([]any, error) {
 //	[0] tag                string            (consumed by decodeEvent)
 //	[1] block_hashes       []hash
 //	[2] parent_block_hash  hash|nil
-//	[3] token_ids          []uint32
+//	[3] token_ids          []uint32 or [][2]uint32 (token bigrams)
 //	[4] block_size         int
 //	[5] lora_id            int|nil
 //	[6] medium             string|nil
@@ -168,7 +168,7 @@ func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericE
 		parentHash = hash
 	}
 
-	tokens, err := toUint32Slice(fields[3])
+	tokens, err := sglangTokenIDs(fields[3])
 	if err != nil {
 		return nil, fmt.Errorf("BlockStored: %w", err)
 	}
@@ -223,6 +223,28 @@ func (s *SGLangAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericE
 		LoraID:      loraID,
 		ExtraKeys:   extraKeys,
 	}, nil
+}
+
+// sglangTokenIDs decodes token_ids. Under EAGLE-family speculative decoding
+// SGLang keys its cache on token bigrams and publishes each token as a
+// [token, next token] pair; a page holds the KV of the first token of each pair.
+func sglangTokenIDs(raw any) ([]uint32, error) {
+	arr, ok := raw.([]any)
+	if !ok || len(arr) == 0 {
+		return toUint32Slice(raw)
+	}
+	if _, isPair := arr[0].([]any); !isPair {
+		return toUint32Slice(raw)
+	}
+	heads := make([]any, len(arr))
+	for i, v := range arr {
+		pair, ok := v.([]any)
+		if !ok || len(pair) != 2 {
+			return nil, fmt.Errorf("token_ids[%d]: expected a token bigram, got %v", i, v)
+		}
+		heads[i] = pair[0]
+	}
+	return toUint32Slice(heads)
 }
 
 // convertBlockRemovedEvent converts a decoded []any into a BlockRemovedEvent.

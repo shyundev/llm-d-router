@@ -379,6 +379,38 @@ func TestSGLangParseMessage_MapEncodedBlockStored_CacheSaltAtRoot(t *testing.T) 
 	assert.Equal(t, [][]any{{"tenant-a"}, nil}, blockStored.ExtraKeys)
 }
 
+// TestSGLangParseMessage_MapEncodedBlockStored_BigramTokens verifies the page
+// payload SGLang publishes under EAGLE-family speculative decoding, where each
+// token is sent as a [token, next token] pair. The page holds the KV of the
+// first token of each pair.
+func TestSGLangParseMessage_MapEncodedBlockStored_BigramTokens(t *testing.T) {
+	adapter := NewSGLangAdapter()
+
+	blockStoredEvent := map[string]any{
+		"type":              "BlockStored",
+		"block_hashes":      []any{uint64(100), uint64(101)},
+		"parent_block_hash": nil,
+		"token_ids":         [][]uint32{{1, 2}, {2, 3}, {3, 4}, {4, 5}},
+		"block_size":        2,
+		"lora_id":           nil,
+		"medium":            "GPU",
+	}
+	payload, err := msgpack.Marshal([]any{1234567890.0, []any{blockStoredEvent}, nil})
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@m",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	require.Len(t, eventBatch.Events, 1)
+
+	blockStored, ok := eventBatch.Events[0].(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Equal(t, []uint32{1, 2, 3, 4}, blockStored.Tokens)
+	assert.Equal(t, 2, blockStored.BlockSize)
+}
+
 // TestSGLangBlockStored_PositionalSaltMetadataIgnored verifies that a positional
 // event carrying the {"cache_salt": ...} metadata slot (sgl-project/sglang#30827,
 // before #37482) still decodes, without reading its salt.
@@ -513,6 +545,15 @@ func TestSGLangMapEncodedErrors(t *testing.T) {
 				"cache_salt":   7,
 			},
 			wantErr: "cache_salt is not a string",
+		},
+		"token bigram with three tokens": {
+			event: map[string]any{
+				"type":         "BlockStored",
+				"block_hashes": []any{uint64(1)},
+				"token_ids":    [][]uint32{{1, 2}, {2, 3, 4}},
+				"block_size":   2,
+			},
+			wantErr: "token_ids[1]: expected a token bigram",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
