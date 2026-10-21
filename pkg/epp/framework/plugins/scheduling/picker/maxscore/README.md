@@ -11,12 +11,12 @@ Selects the endpoint(s) with the highest score calculated during the scoring pha
 
 1. Receives a list of `ScoredEndpoint` candidates.
 2. Sorts candidates by score in descending order using stable sort.
-3. Rotates candidates within each equal-score tier up to `maxNumOfEndpoints` using round-robin rotation for deterministic tie-breaking.
+3. Orders candidates within each equal-score tier up to `maxNumOfEndpoints` so the endpoint this picker returned least recently comes first.
 4. Returns the top `maxNumOfEndpoints` candidates.
 
 ## Behavioral Intent
 
-This picker maximizes adherence to scoring objectives (such as cache affinity or lowest load). For candidates with equal scores, deterministic round-robin rotation distributes requests across tied endpoints to prevent traffic concentration on a single winner.
+This picker maximizes adherence to scoring objectives (such as cache affinity or lowest load). For candidates with equal scores, tied endpoints take turns in round-robin order, also when one picker serves several profiles, to prevent traffic concentration on a single winner.
 
 ## Inputs consumed
 

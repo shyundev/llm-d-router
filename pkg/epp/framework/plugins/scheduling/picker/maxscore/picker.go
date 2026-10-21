@@ -22,14 +22,17 @@ limitations under the License.
 package maxscore
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
@@ -64,6 +67,7 @@ func NewMaxScorePicker(maxNumOfEndpoints int) *MaxScorePicker {
 	return &MaxScorePicker{
 		typedName:         fwkplugin.TypedName{Type: MaxScorePickerType, Name: MaxScorePickerType},
 		maxNumOfEndpoints: maxNumOfEndpoints,
+		lastPicked:        map[fwkdl.ID]uint64{},
 	}
 }
 
@@ -71,6 +75,10 @@ func NewMaxScorePicker(maxNumOfEndpoints int) *MaxScorePicker {
 type MaxScorePicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int // maximum number of endpoints to pick
+
+	mu         sync.Mutex
+	pickSeq    uint64
+	lastPicked map[fwkdl.ID]uint64 // pickSeq of the last pick that returned the endpoint
 }
 
 // WithName sets the picker's name
@@ -102,17 +110,20 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 		return 0
 	})
 
-	// RotateScoredEndpoints provides deterministic round-robin tie-breaking
-	// for equal-score candidates. Rotating within each equal-score tier ensures
-	// traffic is distributed evenly without distortion from lower-scoring endpoints.
-	counter := picker.PickerRand.NextCounter()
+	// Within each equal-score tier, the endpoint picked least recently comes
+	// first, so tied endpoints take turns even when picks for different
+	// candidate sets (e.g. the decode and prefill profiles) interleave.
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for start := 0; start < len(scoredEndpoints) && start < p.maxNumOfEndpoints; {
 		end := start + 1
 		for end < len(scoredEndpoints) && scoredEndpoints[end].Score == scoredEndpoints[start].Score {
 			end++
 		}
 		if end-start > 1 {
-			picker.RotateScoredEndpoints(scoredEndpoints[start:end], counter)
+			slices.SortStableFunc(scoredEndpoints[start:end], func(i, j *fwksched.ScoredEndpoint) int {
+				return cmp.Compare(p.lastPicked[i.GetMetadata().ID], p.lastPicked[j.GetMetadata().ID])
+			})
 		}
 		start = end
 	}
@@ -120,6 +131,11 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	// if we have enough endpoints to return keep only the "maxNumOfEndpoints" highest scored endpoints
 	if p.maxNumOfEndpoints < len(scoredEndpoints) {
 		scoredEndpoints = scoredEndpoints[:p.maxNumOfEndpoints]
+	}
+
+	p.pickSeq++
+	for _, scoredEndpoint := range scoredEndpoints {
+		p.lastPicked[scoredEndpoint.GetMetadata().ID] = p.pickSeq
 	}
 
 	targetEndpoints := make([]fwksched.Endpoint, len(scoredEndpoints))

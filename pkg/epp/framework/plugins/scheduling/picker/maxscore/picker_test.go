@@ -207,6 +207,46 @@ func TestEqualScoreDistribution_MultipleTieTiers(t *testing.T) {
 	}
 }
 
+func TestEqualScoreDistribution_InterleavedProfiles(t *testing.T) {
+	// A P/D request runs the decode profile and then the prefill profile, and
+	// both profiles use the same picker. Each profile's ties must still be
+	// shared evenly.
+	newEndpoints := func(prefix string) []fwksched.Endpoint {
+		endpoints := make([]fwksched.Endpoint, 2)
+		for i := range endpoints {
+			endpoints[i] = fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				ID: k8stypes.NamespacedName{Name: fmt.Sprintf("%s%d", prefix, i)},
+			}, nil, nil)
+		}
+		return endpoints
+	}
+	decodeEndpoints := newEndpoints("decode")
+	prefillEndpoints := newEndpoints("prefill")
+
+	picker := NewMaxScorePicker(1)
+	picks := make(map[string]int)
+	pick := func(endpoints []fwksched.Endpoint) {
+		scored := make([]*fwksched.ScoredEndpoint, len(endpoints))
+		for i, endpoint := range endpoints {
+			scored[i] = &fwksched.ScoredEndpoint{Endpoint: endpoint, Score: 50}
+		}
+		result := picker.Pick(context.Background(), scored)
+		picks[result.TargetEndpoints[0].GetMetadata().ID.Name]++
+	}
+
+	const numRequests = 80
+	for range numRequests {
+		pick(decodeEndpoints)
+		pick(prefillEndpoints)
+	}
+
+	for _, podName := range []string{"decode0", "decode1", "prefill0", "prefill1"} {
+		if picks[podName] != numRequests/2 {
+			t.Errorf("%s got %d requests, expected %d", podName, picks[podName], numRequests/2)
+		}
+	}
+}
+
 func TestPickMaxScorePicker(t *testing.T) {
 	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
 	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
