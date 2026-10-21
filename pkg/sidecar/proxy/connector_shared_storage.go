@@ -27,6 +27,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -73,7 +74,8 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 
 	// we clone the completion request to avoid modifying the original request
 	prefillRequest := maps.Clone(body)
-	if err := s.prefill(w, r, prefillPodHostPort, prefillRequest, apiType); err != nil {
+	prefillUsage, err := s.prefill(w, r, prefillPodHostPort, prefillRequest, apiType)
+	if err != nil {
 		s.logger.Error(err, "prefill failed")
 		return
 	}
@@ -90,12 +92,22 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 
 	decodeReq := cloneRequestWithBody(r.Context(), r, decodeRequestBody)
 	decodeStart := time.Now()
-	decodeWriter, decodeStatus := captureResponseStatus(w)
+	statusWriter, decodeStatus := captureResponseStatus(w)
+	// The decode worker counts the KV it loads from storage as cached, so the
+	// prefill worker's count is the one that describes the prompt cache.
+	cachedTokens, _ := usage.CachedTokens(prefillUsage)
+	streaming, _ := body[reqcommon.FieldStream].(bool)
+	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(statusWriter, cachedTokens, prefillUsage != nil, streaming)
 	decodeReturned := false
 	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
 	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	if err := finalizeDecodeWriter(); err != nil {
+		metrics.RecordError(metrics.StageDecode)
+		s.logger.Error(err, "failed to flush cached token response writer")
+		return
+	}
 	if decodeStatus.failed() {
 		metrics.RecordError(metrics.StageDecode)
 	}
@@ -285,8 +297,9 @@ func (s *Server) checkBufferedResponseForCacheThreshold(data string) bool {
 	return false
 }
 
-// prefill routes a request to a prefill node
-func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any, apiType reqcommon.APIType) error {
+// prefill routes a request to a prefill node and returns the usage block of
+// its response, nil when the response carries none.
+func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostPort string, body map[string]any, apiType reqcommon.APIType) (any, error) {
 	// Prepare prefill request
 	reqcommon.CapSingleToken(body, apiType)
 	body[reqcommon.FieldCacheHitThreshold] = 0
@@ -296,7 +309,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send Invalid JSON error response to client")
 		}
-		return err
+		return nil, err
 	}
 	preq := cloneRequestWithBody(r.Context(), r, pbody)
 
@@ -305,7 +318,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		if err := errorBadGateway(err, w); err != nil {
 			s.logger.Error(err, "failed to send Bad Gateway error response to client")
 		}
-		return err
+		return nil, err
 	}
 
 	// send prefill request
@@ -323,9 +336,14 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 		if pw.buffer.Len() > 0 {
 			WriteAll(w, pw.buffer.Bytes())
 		}
-		return fmt.Errorf("prefill request failed with status code: %d", pw.statusCode)
+		return nil, fmt.Errorf("prefill request failed with status code: %d", pw.statusCode)
 	}
 
 	s.logger.V(logging.DEBUG).Info("prefill completed successfully")
-	return nil
+	// A response that does not decode carries no count to report.
+	var prefillResponse struct {
+		Usage any `json:"usage"`
+	}
+	_ = json.Unmarshal(pw.bodyBytes(), &prefillResponse)
+	return prefillResponse.Usage, nil
 }

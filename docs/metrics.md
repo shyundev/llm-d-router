@@ -327,7 +327,7 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
+The `prefill` attribution matches the `nixlv2` and `shared-storage` KV connectors. The `sglang`,
 `mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
 request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
 describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.

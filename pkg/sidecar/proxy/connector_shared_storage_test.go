@@ -21,8 +21,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -427,6 +429,85 @@ func TestSharedStorage_UpstreamErrorForwardsHeaders(t *testing.T) {
 			header := recorder.Result().Header
 			require.Equal(t, "application/json", header.Get("Content-Type"))
 			require.Equal(t, "failed", header.Get("X-Upstream-Stage"))
+		})
+	}
+}
+
+// TestSharedStorage_ReportsPrefillCachedTokens covers the cached-token count
+// the client receives. The decode worker loads the KV the prefill worker stored
+// and counts it as its own cache hit, so a request that ran prefill reports the
+// prefill worker's count, and a decode-first request reports the decode
+// worker's.
+func TestSharedStorage_ReportsPrefillCachedTokens(t *testing.T) {
+	const (
+		chatPrefill      = `{"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}}}`
+		chatDecode       = `{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":64}}}`
+		chatDecodeStream = `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n" +
+			`data: {"choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n\n" +
+			"data: [DONE]\n\n"
+		responsesPrefill = `{"usage":{"input_tokens":64,"output_tokens":1,"total_tokens":65,"input_tokens_details":{"cached_tokens":7}}}`
+		responsesDecode  = `{"status":"completed","usage":{"input_tokens":64,"output_tokens":1,"total_tokens":65,"input_tokens_details":{"cached_tokens":64}}}`
+	)
+	tests := []struct {
+		name           string
+		path           string
+		apiType        reqcommon.APIType
+		body           string
+		prefillReply   string
+		decodeReply    string
+		wantPrefill    bool
+		wantCachedPart string
+	}{
+		{
+			name: "chat completions", path: reqcommon.PathChatCompletions, apiType: reqcommon.APITypeChatCompletions,
+			body: `{"model":"m","messages":[]}`, prefillReply: chatPrefill, decodeReply: chatDecode,
+			wantPrefill: true, wantCachedPart: `"cached_tokens":7`,
+		},
+		{
+			name: "streamed chat completions", path: reqcommon.PathChatCompletions, apiType: reqcommon.APITypeChatCompletions,
+			body:         `{"model":"m","messages":[],"stream":true,"stream_options":{"include_usage":true}}`,
+			prefillReply: chatPrefill, decodeReply: chatDecodeStream,
+			wantPrefill: true, wantCachedPart: `"cached_tokens":7`,
+		},
+		{
+			name: "responses", path: reqcommon.PathResponses, apiType: reqcommon.APITypeResponses,
+			body: `{"model":"m","input":"hi"}`, prefillReply: responsesPrefill, decodeReply: responsesDecode,
+			wantPrefill: true, wantCachedPart: `"cached_tokens":7`,
+		},
+		{
+			name: "decode-first served without prefill", path: reqcommon.PathChatCompletions, apiType: reqcommon.APITypeChatCompletions,
+			body: `{"model":"m","messages":[],"cache_hit_threshold":0.5}`, prefillReply: chatPrefill, decodeReply: chatDecode,
+			wantPrefill: false, wantCachedPart: `"cached_tokens":64`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var prefillCalls atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				prefillCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.prefillReply)
+			}))
+			defer prefill.Close()
+
+			decodeURL, err := url.Parse("http://decoder:8000")
+			require.NoError(t, err)
+			srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+			srv.logger = log.Log
+			srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", strconv.Itoa(len(tt.decodeReply)))
+				_, _ = io.WriteString(w, tt.decodeReply)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			recorder := httptest.NewRecorder()
+			srv.handleSharedStorage(recorder, req, strings.TrimPrefix(prefill.URL, "http://"), tt.apiType)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, tt.wantPrefill, prefillCalls.Load() == 1)
+			require.Contains(t, recorder.Body.String(), tt.wantCachedPart)
+			require.Equal(t, 1, strings.Count(recorder.Body.String(), `"cached_tokens"`))
 		})
 	}
 }
